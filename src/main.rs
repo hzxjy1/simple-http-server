@@ -215,6 +215,10 @@ fn main() {
             .default_value("/")
             .takes_value(true)
             .help("Base URL to prepend in directory indexes. For reverse proxying. This prefix is supposed to be pre-stripped when reaching simple-http-server."))
+        .arg(clap::Arg::with_name("csrf")
+            .short("r")
+            .long("csrf")
+            .help("Enable csrf check."))
         .get_matches();
 
     let root = matches
@@ -281,12 +285,17 @@ fn main() {
     let silent = matches.is_present("silent");
     let base_url: &str = matches.value_of("base-url").unwrap();
 
+    let csrf = matches.is_present("csrf");
     let upload: Option<Upload> = if upload_arg {
-        let token: String = thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(10)
-            .map(char::from)
-            .collect();
+        let token: String = if csrf {
+            thread_rng()
+                .sample_iter(&Alphanumeric)
+                .take(10)
+                .map(char::from)
+                .collect()
+        } else {
+            "disabled".to_string()
+        };
         Some(Upload { csrf_token: token })
     } else {
         None
@@ -542,36 +551,39 @@ impl MainHandler {
                 match multipart.save().size_limit(self.upload_size_limit).temp() {
                     SaveResult::Full(entries) => {
                         // Pull out csrf field to check if token matches one generated
-                        let csrf_field = match entries
+                        let csrf_field = entries
                             .fields
                             .get("csrf")
                             .map(|fields| fields.first())
-                            .unwrap_or(None)
-                        {
-                            Some(field) => field,
-                            None => {
+                            .unwrap_or(None);
+
+                        let csrf_token = self.upload.as_ref().unwrap().csrf_token.clone();
+                        if csrf_token != "disabled" {
+                            let csrf_field = match csrf_field {
+                                Some(e) => e,
+                                None => {
+                                    return Err((
+                                        status::BadRequest,
+                                        String::from("csrf parameter not provided"),
+                                    ))
+                                }
+                            };
+                            // Read token value from field
+                            let mut token = String::new();
+                            csrf_field
+                                .data
+                                .readable()
+                                .unwrap()
+                                .read_to_string(&mut token)
+                                .unwrap();
+
+                            // Check if they match
+                            if csrf_token != token {
                                 return Err((
                                     status::BadRequest,
-                                    String::from("csrf parameter not provided"),
-                                ))
+                                    String::from("csrf token does not match"),
+                                ));
                             }
-                        };
-
-                        // Read token value from field
-                        let mut token = String::new();
-                        csrf_field
-                            .data
-                            .readable()
-                            .unwrap()
-                            .read_to_string(&mut token)
-                            .unwrap();
-
-                        // Check if they match
-                        if self.upload.as_ref().unwrap().csrf_token != token {
-                            return Err((
-                                status::BadRequest,
-                                String::from("csrf token does not match"),
-                            ));
                         }
 
                         // Grab all the fields named files
